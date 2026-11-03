@@ -7,10 +7,28 @@
 
 use anyhow::{Result, bail};
 use windows::Win32::System::Performance::{
-    PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
-    PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery,
-    PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+    PDH_CSTATUS_INVALID_DATA, PDH_CSTATUS_ITEM_NOT_VALIDATED, PDH_CSTATUS_NEW_DATA,
+    PDH_CSTATUS_NO_COUNTER, PDH_CSTATUS_NO_INSTANCE, PDH_CSTATUS_NO_OBJECT, PDH_CSTATUS_VALID_DATA,
+    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_INVALID_DATA,
+    PDH_MORE_DATA, PDH_NO_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PdhGetFormattedCounterArrayW, PdhOpenQueryW,
 };
+
+/// Statuses that mean "nothing to report right now" rather than a failure:
+/// a counter with no instances (no thermal zone on a VM), or data that is
+/// not valid yet.
+fn is_no_data(status: u32) -> bool {
+    matches!(
+        status,
+        PDH_NO_DATA
+            | PDH_INVALID_DATA
+            | PDH_CSTATUS_NO_INSTANCE
+            | PDH_CSTATUS_NO_OBJECT
+            | PDH_CSTATUS_NO_COUNTER
+            | PDH_CSTATUS_INVALID_DATA
+            | PDH_CSTATUS_ITEM_NOT_VALIDATED
+    )
+}
 use windows::core::{HSTRING, PCWSTR};
 
 pub struct CounterQuery {
@@ -68,7 +86,7 @@ impl CounterQuery {
             PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, None)
         };
         if status != PDH_MORE_DATA {
-            if status == 0 {
+            if status == 0 || is_no_data(status) {
                 return Ok(Vec::new());
             }
             bail!("PdhGetFormattedCounterArrayW(size) = {:#x}", status);
@@ -83,6 +101,9 @@ impl CounterQuery {
                 Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
             )
         };
+        if is_no_data(status) {
+            return Ok(Vec::new());
+        }
         if status != 0 {
             bail!("PdhGetFormattedCounterArrayW = {:#x}", status);
         }
