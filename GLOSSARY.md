@@ -41,6 +41,30 @@ _Avoid_: プライベートバイト、ワーキングセット（別の指標�
 WSL2 や Docker Desktop の仮想マシンが使っているメモリ。Windows 上では `vmmem` や `vmmemWSL` という名前のプロセスとして見える。本アプリでは他のプロセスと区別して扱う。
 _Avoid_: Docker のメモリ、WSL のメモリ（どちらも VM Memory の一部）
 
+**Kernel Commit**:
+Commit Charge のうち、どのプロセスにも属さない分。ページプール・非ページプール・ドライバなどカーネル側の確保。Commit Charge から全プロセスの Process Commit の合計を引いた残り。
+_Avoid_: その他、システム使用量
+
+### CPU
+
+**CPU Load**:
+ある期間に論理プロセッサが遊んでいなかった時間の割合。全体と論理プロセッサごとの両方を扱う。
+_Avoid_: CPU 使用率（Windows の「使用率」はブースト込みの別計算のため）
+
+**Core Temperature**:
+物理コアごとの温度。CPU 内蔵のデジタル温度センサーの値で、ユーザーモードからは直接読めず、センサー提供元を経由して取得する。
+_Avoid_: CPU 温度（Package Temperature と区別がつかないため）
+
+**Package Temperature**:
+CPU パッケージ全体の温度。通常は各 Core Temperature の最大値かそれ以上。
+
+**TjMax**:
+CPU が熱保護のために動作を落とし始める温度。Core Temperature の余裕を測る基準。
+
+**Sensor Provider**:
+温度など本アプリが自力で読めない値を提供する外部プログラム。本アプリは Sensor Provider が動いているときだけその値を表示する。
+_Avoid_: センサーアプリ、監視ツール
+
 ### 状態
 
 **Commit Shortage**:
