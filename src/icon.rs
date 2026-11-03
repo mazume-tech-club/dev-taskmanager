@@ -1,7 +1,13 @@
-//! Tray and window icon: a rounded square in the Alert Level colour, filled
-//! from the bottom in proportion to Commit Usage.
+//! Application icon (assets/icon, from the design zip) for the window, the
+//! tray and the exe resource (see build.rs). The tray icon gets a coloured
+//! badge in the bottom-left corner when the Alert Level is Warning or
+//! Critical; at Normal the plain brand icon is shown.
 
 use crate::alert::AlertLevel;
+
+const PNG_32: &[u8] = include_bytes!("../assets/icon/commitwatch_32.png");
+const PNG_64: &[u8] = include_bytes!("../assets/icon/commitwatch_64.png");
+const PNG_256: &[u8] = include_bytes!("../assets/icon/commitwatch_256.png");
 
 pub fn colour(level: AlertLevel) -> [u8; 3] {
     match level {
@@ -11,52 +17,76 @@ pub fn colour(level: AlertLevel) -> [u8; 3] {
     }
 }
 
-/// Straight-alpha RGBA, top-down rows.
-pub fn rgba(size: usize, level: AlertLevel, usage: f64) -> Vec<u8> {
-    let [r, g, b] = colour(level);
-    let fill_rows = (usage.clamp(0.0, 1.0) * size as f64).round() as usize;
-    let radius = (size as f64 / 6.0).max(2.0);
-    let mut out = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let inside = inside_rounded(x as f64 + 0.5, y as f64 + 0.5, size as f64, radius);
-            let border = inside && !inner(x, y, size);
-            let from_bottom = size - 1 - y;
-            let alpha = if !inside {
-                0
-            } else if border || from_bottom < fill_rows {
-                255
-            } else {
-                96
-            };
-            let i = (y * size + x) * 4;
-            out[i] = r;
-            out[i + 1] = g;
-            out[i + 2] = b;
-            out[i + 3] = alpha;
+/// Decoded straight-alpha RGBA, top-down rows, with its square size.
+pub struct Rgba {
+    pub size: usize,
+    pub data: Vec<u8>,
+}
+
+fn decode(png: &[u8]) -> Rgba {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png));
+    let mut reader = decoder.read_info().expect("embedded icon PNG");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("png size")];
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("embedded icon PNG frame");
+    assert_eq!(info.width, info.height, "icon must be square");
+    assert_eq!(info.color_type, png::ColorType::Rgba, "icon must be RGBA");
+    buf.truncate(info.buffer_size());
+    Rgba {
+        size: info.width as usize,
+        data: buf,
+    }
+}
+
+pub fn brand(size: usize) -> Rgba {
+    match size {
+        0..=32 => decode(PNG_32),
+        33..=64 => decode(PNG_64),
+        _ => decode(PNG_256),
+    }
+}
+
+/// Window / taskbar icon.
+pub fn window_rgba() -> Rgba {
+    brand(64)
+}
+
+/// Tray icon for the level: brand icon plus a badge for Warning/Critical.
+pub fn tray_rgba(level: AlertLevel) -> Rgba {
+    let mut img = brand(32);
+    if level != AlertLevel::Normal {
+        let [r, g, b] = colour(level);
+        draw_badge(&mut img, [r, g, b]);
+    }
+    img
+}
+
+/// Filled circle with a white ring in the bottom-left corner, about 45% of
+/// the icon so it survives scaling to 16 px.
+fn draw_badge(img: &mut Rgba, [r, g, b]: [u8; 3]) {
+    let s = img.size as f64;
+    let radius = s * 0.22;
+    let cx = radius + 0.5;
+    let cy = s - radius - 0.5;
+    for y in 0..img.size {
+        for x in 0..img.size {
+            let d = ((x as f64 + 0.5 - cx).powi(2) + (y as f64 + 0.5 - cy).powi(2)).sqrt();
+            let i = (y * img.size + x) * 4;
+            if d <= radius - 1.5 {
+                img.data[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+            } else if d <= radius {
+                img.data[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
         }
     }
-    out
-}
-
-fn inner(x: usize, y: usize, size: usize) -> bool {
-    let edge = (size / 16).max(1);
-    x >= edge && y >= edge && x < size - edge && y < size - edge
-}
-
-fn inside_rounded(x: f64, y: f64, size: f64, r: f64) -> bool {
-    if x < 0.0 || y < 0.0 || x > size || y > size {
-        return false;
-    }
-    let cx = x.clamp(r, size - r);
-    let cy = y.clamp(r, size - r);
-    (x - cx).powi(2) + (y - cy).powi(2) <= r * r
 }
 
 /// Icon image resource (BITMAPINFOHEADER + BGRA bottom-up + empty AND mask),
 /// the format `CreateIconFromResourceEx` accepts.
-pub fn ico_image(size: usize, level: AlertLevel, usage: f64) -> Vec<u8> {
-    let rgba = rgba(size, level, usage);
+pub fn ico_image(img: &Rgba) -> Vec<u8> {
+    let size = img.size;
+    let rgba = &img.data;
     let mask_stride = size.div_ceil(32) * 4;
     let xor_len = size * size * 4;
     let and_len = mask_stride * size;
@@ -79,25 +109,36 @@ pub fn ico_image(size: usize, level: AlertLevel, usage: f64) -> Vec<u8> {
     out
 }
 
+/// Tray icon as an icon resource for the given level.
+pub fn tray_image(level: AlertLevel) -> Vec<u8> {
+    ico_image(&tray_rgba(level))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fill_follows_usage() {
-        let full = rgba(32, AlertLevel::Normal, 1.0);
-        let empty = rgba(32, AlertLevel::Normal, 0.0);
-        // centre pixel near the top: opaque when full, translucent when empty
-        let i = (4 * 32 + 16) * 4 + 3;
-        assert_eq!(full[i], 255);
-        assert_eq!(empty[i], 96);
-        // corners are transparent
-        assert_eq!(full[3], 0);
+    fn embedded_pngs_decode() {
+        assert_eq!(brand(32).size, 32);
+        assert_eq!(brand(64).size, 64);
+        assert_eq!(brand(256).size, 256);
+        assert_eq!(brand(32).data.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn badge_only_when_not_normal() {
+        let normal = tray_rgba(AlertLevel::Normal);
+        let critical = tray_rgba(AlertLevel::Critical);
+        // bottom-left corner pixel region: unchanged for Normal, red for Critical
+        let i = ((32 - 7) * 32 + 7) * 4;
+        assert_eq!(normal.data[i..i + 4], brand(32).data[i..i + 4]);
+        assert_eq!(critical.data[i..i + 4], [220, 50, 47, 255]);
     }
 
     #[test]
     fn ico_image_has_expected_length() {
-        let img = ico_image(32, AlertLevel::Critical, 0.5);
+        let img = tray_image(AlertLevel::Warning);
         assert_eq!(img.len(), 40 + 32 * 32 * 4 + 4 * 32);
         assert_eq!(&img[0..4], &40u32.to_le_bytes());
     }

@@ -634,9 +634,10 @@ fn install_font(ctx: &egui::Context) {
 }
 
 pub fn window_icon() -> egui::IconData {
+    let img = icon::window_rgba();
     egui::IconData {
-        rgba: icon::rgba(64, AlertLevel::Normal, 0.6),
-        width: 64,
-        height: 64,
+        rgba: img.data,
+        width: img.size as u32,
+        height: img.size as u32,
     }
 }

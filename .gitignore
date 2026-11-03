@@ -12,3 +12,6 @@ desktop.ini
 
 # signing keys never belong in the repo
 *.key
+
+# dropped-in archives (icons etc. are copied into assets/)
+*.zip

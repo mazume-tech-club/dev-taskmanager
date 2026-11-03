@@ -622,8 +622,8 @@ impl State {
     }
 }
 
-fn make_icon(level: AlertLevel, usage: f64) -> HICON {
-    let image = icon::ico_image(ICON_SIZE, level, usage);
+fn make_icon(level: AlertLevel, _usage: f64) -> HICON {
+    let image = icon::tray_image(level);
     unsafe {
         CreateIconFromResourceEx(
             &image,
