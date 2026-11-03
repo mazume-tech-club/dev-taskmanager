@@ -7,7 +7,7 @@
 //! cannot create a second event loop in one process once the first is gone.
 
 use crate::metrics::{PageFile, ProcessCommit, SystemMemory};
-use crate::sample::Sample;
+use crate::sample::{Sample, SensorState};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use std::ffi::c_void;
@@ -21,10 +21,11 @@ use windows::core::w;
 
 const NAME: windows::core::PCWSTR = w!("Local\\CommitWatch.state");
 const MAGIC: u32 = 0x4357_5348; // "CWSH"
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 pub const CAPACITY: usize = 600;
 pub const MAX_LOGICAL: usize = 64;
 pub const MAX_PROCS: usize = 32;
+pub const MAX_CORES: usize = 32;
 const NAME_CHARS: usize = 64;
 
 #[repr(C)]
@@ -62,6 +63,14 @@ struct SampleWire {
     _pad: u8,
     cpu_per_logical: [f32; MAX_LOGICAL],
     clock_mhz: [f32; MAX_LOGICAL],
+    core_count: u8,
+    sensor_state: u8,
+    _pad2: [u8; 2],
+    tj_max_c: f32, // NaN = none
+    vid_v: f32,    // NaN = none
+    package_power_w: f32,
+    tdp_w: f32,
+    core_temps_c: [f32; MAX_CORES],
 }
 
 #[repr(C)]
@@ -263,7 +272,18 @@ fn to_wire(s: &Sample) -> SampleWire {
         _pad: 0,
         cpu_per_logical: [0.0; MAX_LOGICAL],
         clock_mhz: [0.0; MAX_LOGICAL],
+        core_count: s.core_temps_c.len().min(MAX_CORES) as u8,
+        sensor_state: s.sensor_state.to_u8(),
+        _pad2: [0; 2],
+        tj_max_c: s.tj_max_c.map_or(f32::NAN, |v| v as f32),
+        vid_v: s.vid_v.map_or(f32::NAN, |v| v as f32),
+        package_power_w: s.package_power_w.map_or(f32::NAN, |v| v as f32),
+        tdp_w: s.tdp_w.map_or(f32::NAN, |v| v as f32),
+        core_temps_c: [0.0; MAX_CORES],
     };
+    for (i, v) in s.core_temps_c.iter().take(MAX_CORES).enumerate() {
+        w.core_temps_c[i] = *v as f32;
+    }
     for (i, v) in s.cpu_per_logical.iter().take(MAX_LOGICAL).enumerate() {
         w.cpu_per_logical[i] = *v as f32;
     }
@@ -307,6 +327,15 @@ fn from_wire(w: &SampleWire) -> Sample {
         thermal_zone_c: opt(w.thermal_zone_c),
         package_temp_c: opt(w.package_temp_c),
         temp_margin_c: opt(w.temp_margin_c),
+        core_temps_c: w.core_temps_c[..(w.core_count as usize).min(MAX_CORES)]
+            .iter()
+            .map(|v| *v as f64)
+            .collect(),
+        tj_max_c: opt(w.tj_max_c),
+        vid_v: opt(w.vid_v),
+        package_power_w: opt(w.package_power_w),
+        tdp_w: opt(w.tdp_w),
+        sensor_state: SensorState::from_u8(w.sensor_state),
     }
 }
 
@@ -372,6 +401,9 @@ mod tests {
         assert_eq!(got[0].clock_mhz, vec![4000.0, 3000.0]);
         assert_eq!(got[0].thermal_zone_c, Some(30.0));
         assert_eq!(got[0].package_temp_c, None);
+        assert_eq!(got[0].core_temps_c, vec![41.0, 43.0]);
+        assert_eq!(got[0].tj_max_c, Some(100.0));
+        assert_eq!(got[0].sensor_state, SensorState::Available);
     }
 
     #[test]

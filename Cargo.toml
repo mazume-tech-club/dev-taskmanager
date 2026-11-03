@@ -2,13 +2,14 @@
 name = "commitwatch"
 version = "0.1.0"
 edition = "2024"
+default-run = "commitwatch"
 
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = "0.4.45"
 dirs = "7.0.0"
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wgpu"] }
 egui_plot = "0.38"
 env_logger = "0.11.11"
 log = "0.4.35"
@@ -19,7 +20,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
 ureq = { version = "3.5.1", default-features = false, features = ["native-tls", "json"] }
-windows = { version = "0.62.2", features = ["Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_System_Performance", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Wdk_System_SystemInformation", "Wdk_Foundation", "Win32_System_WindowsProgramming", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_Memory"] }
+windows = { version = "0.62.2", features = ["Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_System_Performance", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Wdk_System_SystemInformation", "Wdk_Foundation", "Win32_System_WindowsProgramming", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_Memory", "Win32_System_IO", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 lto = true

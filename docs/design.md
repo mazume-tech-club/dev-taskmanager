@@ -52,14 +52,31 @@ Claude Code・Orca・Docker を併用すると、RAM は空いているのに Co
   マザーボードの 1 点で、Core Temperature ではないことを画面に明記する。
 - Core Temperature・TjMax・VID・パッケージ電力は「取得不可（Sensor Provider 未導入）」と表示する。
 
-### 第 2 段（Sensor Provider = PawnIO）
+### 第 2 段（Sensor Provider = PawnIO）— 実装済み、実機未検証
 
-- PawnIO の公式モジュール `IntelMSR` を IOCTL で呼び、`IA32_THERM_STATUS`（コア温度）、`MSR_TEMPERATURE_TARGET`（TjMax）、
-  `IA32_PACKAGE_THERM_STATUS`（パッケージ温度）、RAPL（電力）、`IA32_PERF_STATUS`（VID）を読む。
-- アプリ全体を管理者権限で動かす。自動起動はタスクスケジューラの最上位特権で登録し UAC を出さない。
+- `src/pawnio.rs`: デバイス `\\?\GLOBALROOT\Device\PawnIO` を開き、`IOCTL_PIO_LOAD_BINARY` で公式モジュール
+  `IntelMSR.bin`（`assets/pawnio/`、LGPL-2.1、PawnIO.Modules 0.2.11 の署名済みビルド）を読み込み、
+  `IOCTL_PIO_EXECUTE_FN` で `ioctl_read_msr` を呼ぶ。入力は 32 バイトの関数名 + i64 引数、出力は i64 配列。
+- `src/sensors.rs`: 物理コアごとにスレッドアフィニティを切り替えて `IA32_THERM_STATUS`（コア温度）を読み、
+  `MSR_TEMPERATURE_TARGET`（TjMax）、`IA32_PACKAGE_THERM_STATUS`（Package Temperature）、`IA32_PERF_STATUS`（VID）、
+  RAPL（`MSR_RAPL_POWER_UNIT`、`MSR_PKG_ENERGY_STATUS` の差分で電力、`MSR_PKG_POWER_INFO` で TDP）を読む。
+- 状態は Sample の `sensor_state` で持つ: 設定で無効 / 取得中 / PawnIO 未インストール / 管理者権限が必要 / 読み取り失敗。
+  未インストール時はトレイメニューに「PawnIO をインストール」（公式セットアップのダウンロード）、権限不足時は
+  「管理者権限で再起動」（UAC 1 回、`--wait-for <pid>` で旧プロセスを待ってから常駐）が出る。
+- 管理者権限で動いているときの自動起動は Run キーではなくタスクスケジューラ（`/RL HIGHEST /SC ONLOGON`）に登録する。
+  Run キーからは昇格起動できないため。
+- ログの Minute Record に `core_temp_max_c`（その分で最も熱かったコア）を追加。Package Temperature の平均・最大は既存列。
 - Intel 先行。AMD は別モジュールが必要になった時点で追加。
-- 温度の Alert Level: Package Temperature が TjMax − 15 ℃ で Warning、TjMax − 5 ℃ で Critical。トレイアイコンの色はメモリと温度の悪い方。
+- 温度の Alert Level: 最も熱い値（パッケージとコア）が TjMax − 15 ℃ で Warning、TjMax − 5 ℃ で Critical。トレイアイコンの色はメモリと温度の悪い方。
 - 他ツール（Core Temp 等）の共有メモリは読まない。個人利用限定ライセンスと UAC の問題があるため。
+- 2026-11-03 時点: この PC に PawnIO が未インストール（インストールと管理者実行に UAC が要るため無人検証不可）。
+  通常権限での `--probe` は「PawnIO がインストールされていません」と正しく報告する。MSR の値の正しさは実機で未確認。
+
+### ウィンドウのレンダラー
+
+OpenGL（glow）を既定にし、RDP の切断中や VM などで OpenGL 2.0 が無い場合は自動で wgpu（DirectX）の
+ウィンドウプロセスを起動し直す（`--window-wgpu`）。wgpu 時はウィンドウのメモリが大きい（NVIDIA で約 290 MB）が、
+常駐側には影響しない。切断中の RDP セッションで動作確認済み。
 
 ## 性能予算
 

@@ -17,6 +17,7 @@ pub struct Config {
     pub log: LogConfig,
     pub update: UpdateConfig,
     pub general: GeneralConfig,
+    pub sensors: SensorsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +48,20 @@ pub struct UpdateConfig {
     pub check_interval_hours: u32,
     /// Overrides the latest.json URL (testing). `file://` paths are allowed.
     pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensorsConfig {
+    /// Use the Sensor Provider (PawnIO) for Core Temperature etc. Needs the
+    /// driver installed and the resident process running as administrator.
+    pub enabled: bool,
+}
+
+impl Default for SensorsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

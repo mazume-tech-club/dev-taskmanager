@@ -1,5 +1,7 @@
-//! Start-at-login via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-//! Per user, no administrator rights.
+//! Start-at-login. Without administrator rights this is the per-user
+//! `HKCU\...\Run` key. When the process is elevated (Sensor Provider
+//! mode) it is a scheduled task with highest privileges instead, because a
+//! Run-key entry cannot start elevated without a UAC prompt at logon.
 
 use crate::config::APP_NAME;
 use anyhow::{Context, Result, bail};
@@ -22,7 +24,7 @@ pub fn command() -> Result<String> {
     Ok(format!("\"{}\" --hidden", exe.display()))
 }
 
-pub fn is_enabled() -> bool {
+fn run_key_is_enabled() -> bool {
     let mut len = 0u32;
     let status = unsafe {
         RegGetValueW(
@@ -38,7 +40,7 @@ pub fn is_enabled() -> bool {
     status.is_ok() && len > 0
 }
 
-pub fn set(enabled: bool) -> Result<()> {
+fn run_key_set(enabled: bool) -> Result<()> {
     let mut key = HKEY::default();
     let status =
         unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, KEY_SET_VALUE, &mut key) };
@@ -70,3 +72,68 @@ pub fn set(enabled: bool) -> Result<()> {
 
 #[allow(dead_code)]
 fn _assert_void(_: *mut c_void) {}
+
+const TASK_NAME: &str = "CommitWatch";
+
+fn is_elevated() -> bool {
+    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
+}
+
+fn schtasks(args: &[&str]) -> Result<bool> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("schtasks.exe")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .context("run schtasks")?;
+    Ok(out.status.success())
+}
+
+fn task_is_enabled() -> bool {
+    schtasks(&["/Query", "/TN", TASK_NAME]).unwrap_or(false)
+}
+
+fn task_set(enabled: bool) -> Result<()> {
+    if enabled {
+        let cmd = command()?;
+        let ok = schtasks(&[
+            "/Create", "/F", "/TN", TASK_NAME, "/TR", &cmd, "/SC", "ONLOGON", "/RL", "HIGHEST",
+            "/IT",
+        ])?;
+        if !ok {
+            bail!("schtasks /Create failed");
+        }
+        Ok(())
+    } else {
+        if task_is_enabled() && !schtasks(&["/Delete", "/F", "/TN", TASK_NAME])? {
+            bail!("schtasks /Delete failed");
+        }
+        Ok(())
+    }
+}
+
+/// True when either mechanism is registered.
+pub fn is_enabled() -> bool {
+    run_key_is_enabled() || task_is_enabled()
+}
+
+/// Registers (or removes) autostart using the mechanism that fits the
+/// current privilege level, and clears the other one.
+pub fn set(enabled: bool) -> Result<()> {
+    if is_elevated() {
+        run_key_set(false)?;
+        task_set(enabled)
+    } else {
+        if task_is_enabled() {
+            // Can only be removed elevated; leave it and report.
+            if !enabled {
+                bail!(
+                    "管理者権限のタスクが登録されています。管理者権限で起動してから無効にしてください"
+                );
+            }
+            return Ok(());
+        }
+        run_key_set(enabled)
+    }
+}

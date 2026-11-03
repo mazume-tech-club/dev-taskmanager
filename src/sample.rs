@@ -6,6 +6,8 @@ use crate::config::Config;
 use crate::cpu::{ClockSampler, CpuSampler};
 use crate::metrics::{self, ProcessCommit, SystemMemory};
 use crate::minute::{MinuteAccumulator, MinuteRecord};
+use crate::pawnio::Unavailable;
+use crate::sensors::IntelSensors;
 use crate::shm;
 use crate::thermal::ThermalSampler;
 use anyhow::Result;
@@ -31,8 +33,56 @@ pub struct Sample {
     pub thermal_zone_c: Option<f64>,
     /// Package Temperature in Celsius. `None` until a Sensor Provider exists.
     pub package_temp_c: Option<f64>,
-    /// TjMax minus Package Temperature. `None` until a Sensor Provider exists.
+    /// TjMax minus the hottest temperature. `None` without a Sensor Provider.
     pub temp_margin_c: Option<f64>,
+    /// Core Temperature per physical core, from the Sensor Provider.
+    pub core_temps_c: Vec<f64>,
+    pub tj_max_c: Option<f64>,
+    pub vid_v: Option<f64>,
+    pub package_power_w: Option<f64>,
+    pub tdp_w: Option<f64>,
+    pub sensor_state: SensorState,
+}
+
+/// Whether the Sensor Provider is delivering values, and if not, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SensorState {
+    #[default]
+    Disabled,
+    Available,
+    NotInstalled,
+    NotElevated,
+    Failed,
+}
+
+impl SensorState {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::Available => 1,
+            Self::NotInstalled => 2,
+            Self::NotElevated => 3,
+            Self::Failed => 4,
+        }
+    }
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Available,
+            2 => Self::NotInstalled,
+            3 => Self::NotElevated,
+            4 => Self::Failed,
+            _ => Self::Disabled,
+        }
+    }
+    pub fn label_ja(self) -> &'static str {
+        match self {
+            Self::Disabled => "設定で無効",
+            Self::Available => "取得中",
+            Self::NotInstalled => "PawnIO が未インストール",
+            Self::NotElevated => "管理者権限が必要",
+            Self::Failed => "読み取りに失敗",
+        }
+    }
 }
 
 impl Sample {
@@ -100,15 +150,37 @@ struct Sources {
     cpu: CpuSampler,
     clock: Option<ClockSampler>,
     thermal: Option<ThermalSampler>,
+    sensors: Option<IntelSensors>,
+    sensor_state: SensorState,
+}
+
+fn open_sensors(enabled: bool) -> (Option<IntelSensors>, SensorState) {
+    if !enabled {
+        return (None, SensorState::Disabled);
+    }
+    match IntelSensors::new() {
+        Ok(s) => (Some(s), SensorState::Available),
+        Err(Unavailable::NotInstalled) => (None, SensorState::NotInstalled),
+        Err(Unavailable::NotElevated) => (None, SensorState::NotElevated),
+        Err(Unavailable::Other(e)) => {
+            log::warn!("sensor provider: {e}");
+            (None, SensorState::Failed)
+        }
+    }
 }
 
 fn run(cfg: Config, shared: Arc<Mutex<Shared>>, minutes: Sender<MinuteRecord>, stop: Receiver<()>) {
     let mut sources = match CpuSampler::new() {
-        Ok(cpu) => Sources {
-            cpu,
-            clock: ClockSampler::new().ok(),
-            thermal: ThermalSampler::new().ok().flatten(),
-        },
+        Ok(cpu) => {
+            let (sensors, sensor_state) = open_sensors(cfg.sensors.enabled);
+            Sources {
+                cpu,
+                clock: ClockSampler::new().ok(),
+                thermal: ThermalSampler::new().ok().flatten(),
+                sensors,
+                sensor_state,
+            }
+        }
         Err(e) => {
             shared.lock().unwrap().last_error = Some(format!("CPU sampler: {e}"));
             return;
@@ -187,6 +259,19 @@ fn take_sample(sources: &mut Sources, processes: &[ProcessCommit], top_n: usize)
         .and_then(|t| t.sample().ok())
         .and_then(|zones| zones.first().map(|z| z.celsius));
 
+    let reading = match sources.sensors.as_mut() {
+        Some(sensors) => match sensors.read() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::warn!("sensor read failed, disabling: {e}");
+                sources.sensors = None;
+                sources.sensor_state = SensorState::Failed;
+                None
+            }
+        },
+        None => None,
+    };
+
     let process_sum: u64 = processes.iter().map(|p| p.commit).sum();
     let vm_memory = processes
         .iter()
@@ -205,8 +290,17 @@ fn take_sample(sources: &mut Sources, processes: &[ProcessCommit], top_n: usize)
         cpu_per_logical: load.per_logical,
         clock_mhz,
         thermal_zone_c,
-        package_temp_c: None,
-        temp_margin_c: None,
+        package_temp_c: reading.as_ref().and_then(|r| r.package_temp_c),
+        temp_margin_c: reading.as_ref().and_then(|r| r.margin_to_tj_max_c()),
+        core_temps_c: reading
+            .as_ref()
+            .map(|r| r.core_temps_c.clone())
+            .unwrap_or_default(),
+        tj_max_c: reading.as_ref().map(|r| r.tj_max_c),
+        vid_v: reading.as_ref().and_then(|r| r.vid_v),
+        package_power_w: reading.as_ref().and_then(|r| r.package_power_w),
+        tdp_w: reading.as_ref().and_then(|r| r.tdp_w),
+        sensor_state: sources.sensor_state,
         memory,
     })
 }

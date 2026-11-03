@@ -9,8 +9,10 @@ mod icon;
 mod logger;
 mod metrics;
 mod minute;
+mod pawnio;
 mod pdh;
 mod sample;
+mod sensors;
 mod shm;
 mod thermal;
 mod tray;
@@ -31,6 +33,32 @@ use windows::core::w;
 /// - `--window`: the window process, started by the resident.
 /// - `--probe`, `--headless [secs]`, `--check-update`, `--apply-update`: console diagnostics.
 fn main() -> Result<()> {
+    let result = run();
+    if let Err(e) = &result {
+        record_error(&format!("{e:#}"));
+    }
+    result
+}
+
+/// Errors from a role without a console go to crash.log too.
+fn record_error(msg: &str) {
+    if let Ok(dir) = config::data_dir() {
+        let line = format!(
+            "{} error: {msg}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("crash.log"))
+        {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--probe") => {
@@ -59,7 +87,13 @@ fn main() -> Result<()> {
             update::finish_after_update(pid);
             resident(false)
         }
-        Some("--window") => window(),
+        Some("--wait-for") => {
+            let pid: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            update::wait_for_pid(pid);
+            resident(false)
+        }
+        Some("--window") => window(eframe::Renderer::Glow),
+        Some("--window-wgpu") => window(eframe::Renderer::Wgpu),
         Some("--hidden") => resident(true),
         _ => resident(false),
     }
@@ -106,6 +140,10 @@ fn single_instance() -> bool {
     }
 }
 
+fn is_elevated() -> bool {
+    unsafe { windows::Win32::UI::Shell::IsUserAnAdmin().as_bool() }
+}
+
 fn resident(start_hidden: bool) -> Result<()> {
     install_panic_log();
     update::detach_inherited_stdio();
@@ -129,7 +167,10 @@ fn resident(start_hidden: bool) -> Result<()> {
     Ok(())
 }
 
-fn window() -> Result<()> {
+/// The window process. OpenGL (glow) is the light default; when it is not
+/// available (RDP sessions, some VMs) the process re-launches itself with
+/// the wgpu (DirectX) renderer.
+fn window(renderer: eframe::Renderer) -> Result<()> {
     install_panic_log();
     update::detach_inherited_stdio();
     let cfg = Config::load()?;
@@ -139,6 +180,7 @@ fn window() -> Result<()> {
         let _ = std::process::Command::new(exe).arg("--hidden").spawn();
     }
     let options = eframe::NativeOptions {
+        renderer,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(tray::WINDOW_TITLE)
             .with_inner_size(app::NORMAL_SIZE)
@@ -146,12 +188,32 @@ fn window() -> Result<()> {
             .with_icon(app::window_icon()),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         tray::WINDOW_TITLE,
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, cfg)))),
-    )
-    .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+    );
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if renderer == eframe::Renderer::Glow && is_gl_unavailable(&e) => {
+            record_error(&format!("OpenGL unavailable ({e}); retrying with wgpu"));
+            let exe = std::env::current_exe().context("current_exe")?;
+            std::process::Command::new(exe)
+                .arg("--window-wgpu")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("start wgpu window")?;
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("eframe: {e}")),
+    }
+}
+
+fn is_gl_unavailable(e: &eframe::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("egui_glow") || msg.contains("OpenGL") || msg.contains("glutin")
 }
 
 /// Console diagnostic: check, download and verify, but do not apply.
@@ -335,6 +397,37 @@ CPU Load (1s): total {:.1}%  per logical: {}",
             }
         }
     }
-    println!("Core Temperature: unavailable (Sensor Provider is a later phase)");
+    println!(
+        "Sensor Provider: PawnIO {} / elevated={}",
+        pawnio::installed_version()
+            .map(|v| format!("v{v} installed"))
+            .unwrap_or_else(|| "not installed".into()),
+        is_elevated()
+    );
+    match sensors::IntelSensors::new() {
+        Err(e) => println!("  unavailable: {e}"),
+        Ok(mut s) => {
+            let _ = s.read(); // first read primes the energy counter
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            match s.read() {
+                Ok(r) => {
+                    println!(
+                        "  cores {}  TjMax {:.0} C  package {:?} C  VID {:?} V  power {:?} W  TDP {:?} W  margin {:?} C",
+                        s.core_count(),
+                        r.tj_max_c,
+                        r.package_temp_c,
+                        r.vid_v,
+                        r.package_power_w,
+                        r.tdp_w,
+                        r.margin_to_tj_max_c()
+                    );
+                    for (i, t) in r.core_temps_c.iter().enumerate() {
+                        println!("  core {i:<2} {t:>5.1} C");
+                    }
+                }
+                Err(e) => println!("  read failed: {e}"),
+            }
+        }
+    }
     Ok(())
 }

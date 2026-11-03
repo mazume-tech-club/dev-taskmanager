@@ -31,6 +31,8 @@ pub struct MinuteRecord {
     pub thermal_zone_max_c: Option<f64>,
     pub package_temp_avg_c: Option<f64>,
     pub package_temp_max_c: Option<f64>,
+    /// Hottest Core Temperature seen during the minute.
+    pub core_temp_max_c: Option<f64>,
     /// Top Processes at the end of the minute.
     pub top_processes: Vec<ProcessCommit>,
 }
@@ -88,6 +90,7 @@ pub struct MinuteAccumulator {
     clock: Stat,
     thermal_zone: Stat,
     package_temp: Stat,
+    core_temp: Stat,
     top_processes: Vec<ProcessCommit>,
 }
 
@@ -131,6 +134,14 @@ impl MinuteAccumulator {
         if let Some(t) = s.package_temp_c {
             self.package_temp.push(t);
         }
+        if let Some(t) = s
+            .core_temps_c
+            .iter()
+            .copied()
+            .fold(None, |m, t| Some(m.map_or(t, |m: f64| m.max(t))))
+        {
+            self.core_temp.push(t);
+        }
         self.top_processes = s.top_processes.clone();
         finished
     }
@@ -162,6 +173,7 @@ impl MinuteAccumulator {
             thermal_zone_max_c: self.thermal_zone.max_opt(),
             package_temp_avg_c: self.package_temp.avg_opt(),
             package_temp_max_c: self.package_temp.max_opt(),
+            core_temp_max_c: self.core_temp.max_opt(),
             top_processes: std::mem::take(&mut self.top_processes),
         };
         *self = Self::default();
@@ -203,6 +215,12 @@ pub(crate) mod tests {
             thermal_zone_c: Some(30.0),
             package_temp_c: None,
             temp_margin_c: None,
+            core_temps_c: vec![41.0, 43.0],
+            tj_max_c: Some(100.0),
+            vid_v: None,
+            package_power_w: None,
+            tdp_w: None,
+            sensor_state: crate::sample::SensorState::Available,
         }
     }
 
@@ -230,6 +248,7 @@ pub(crate) mod tests {
         assert_eq!(rec.clock_avg_mhz, 3500.0);
         assert_eq!(rec.thermal_zone_max_c, Some(30.0));
         assert_eq!(rec.package_temp_avg_c, None);
+        assert_eq!(rec.core_temp_max_c, Some(43.0));
         assert_eq!(rec.top_processes[0].commit, 40);
         // the new minute continues with the third sample
         let partial = acc.flush().unwrap();

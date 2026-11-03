@@ -8,7 +8,8 @@ use crate::autostart;
 use crate::config::{self, Config};
 use crate::icon;
 use crate::metrics::fmt_gib;
-use crate::sample::Sample;
+use crate::pawnio;
+use crate::sample::{Sample, SensorState};
 use crate::shm;
 use crate::update;
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -286,6 +287,20 @@ impl App {
                         .unwrap_or_else(|| "なし".into()),
                 );
                 ui.end_row();
+                ui.label("Package Temperature");
+                ui.label(match (s.package_temp_c, s.sensor_state) {
+                    (Some(t), _) => {
+                        format!("{t:.0} ℃（TjMax {:.0} ℃）", s.tj_max_c.unwrap_or(100.0))
+                    }
+                    (None, st) => st.label_ja().to_string(),
+                });
+                ui.label("パッケージ電力");
+                ui.label(
+                    s.package_power_w
+                        .map(|w| format!("{w:.1} W"))
+                        .unwrap_or_else(|| "-".into()),
+                );
+                ui.end_row();
             });
         ui.add_space(8.0);
         ui.label("直近 10 分（%）");
@@ -381,9 +396,76 @@ impl App {
                 .map(|t| format!("{t:.1} ℃"))
                 .unwrap_or_else(|| "なし".into())
         ));
-        ui.label(
-            "Core Temperature / TjMax / 電力: 取得不可（Sensor Provider 未導入。第 2 段で対応）",
-        );
+        ui.add_space(8.0);
+        ui.heading("CPU センサー（Sensor Provider: PawnIO）");
+        match s.sensor_state {
+            SensorState::Available => {
+                let tj = s.tj_max_c.unwrap_or(100.0);
+                egui::Grid::new("sensors")
+                    .num_columns(4)
+                    .spacing([24.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Package Temperature");
+                        ui.label(
+                            s.package_temp_c
+                                .map(|t| format!("{t:.0} ℃"))
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        ui.label("TjMax");
+                        ui.label(format!("{tj:.0} ℃"));
+                        ui.end_row();
+                        ui.label("パッケージ電力");
+                        ui.label(
+                            s.package_power_w
+                                .map(|w| format!("{w:.1} W"))
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        ui.label("TDP");
+                        ui.label(
+                            s.tdp_w
+                                .map(|w| format!("{w:.0} W"))
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        ui.end_row();
+                        ui.label("VID");
+                        ui.label(
+                            s.vid_v
+                                .map(|v| format!("{v:.3} V"))
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        ui.label("TjMax までの余裕");
+                        ui.label(
+                            s.temp_margin_c
+                                .map(|m| format!("{m:.0} ℃"))
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        ui.end_row();
+                    });
+                for (i, t) in s.core_temps_c.iter().enumerate() {
+                    ui.add(
+                        egui::ProgressBar::new((t / tj) as f32)
+                            .text(format!("Core {i:<2}  {t:>4.0} ℃")),
+                    );
+                }
+            }
+            SensorState::Disabled => {
+                ui.label("設定で無効になっています（設定タブ → CPU センサー）。");
+            }
+            SensorState::NotInstalled => {
+                ui.label("PawnIO ドライバが未インストールです。トレイメニューの「PawnIO をインストール」からセットアップをダウンロードし、インストール後にトレイメニューの「管理者権限で再起動」を選んでください。");
+                if ui.link("PawnIO セットアップをダウンロード").clicked() {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", pawnio::INSTALLER_URL])
+                        .spawn();
+                }
+            }
+            SensorState::NotElevated => {
+                ui.label("温度の読み取りには管理者権限が必要です。トレイメニューの「管理者権限で再起動」を選んでください。");
+            }
+            SensorState::Failed => {
+                ui.label("センサーの読み取りに失敗しました（Intel 以外の CPU、または対応外）。");
+            }
+        }
     }
 
     fn settings(&mut self, ui: &mut Ui) {
@@ -479,6 +561,13 @@ impl App {
                 ui.label(st);
             }
         });
+
+        ui.add_space(8.0);
+        ui.heading("CPU センサー");
+        ui.checkbox(
+            &mut d.sensors.enabled,
+            "PawnIO 経由でコア温度・電力を読む（管理者権限が必要。変更は常駐の再起動後に反映）",
+        );
 
         ui.add_space(8.0);
         ui.heading("起動");

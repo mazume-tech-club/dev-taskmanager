@@ -54,6 +54,7 @@ impl CsvLog {
             "thermal_zone_max_c",
             "package_temp_avg_c",
             "package_temp_max_c",
+            "core_temp_max_c",
         ]
         .into_iter()
         .map(String::from)
@@ -93,6 +94,7 @@ impl CsvLog {
             opt(rec.thermal_zone_max_c),
             opt(rec.package_temp_avg_c),
             opt(rec.package_temp_max_c),
+            opt(rec.core_temp_max_c),
         ];
         for i in 0..top_n {
             match rec.top_processes.get(i) {
@@ -122,6 +124,7 @@ impl CsvLog {
             self.last_day = Some(day);
         }
         let path = self.path_for(day);
+        self.rotate_if_header_changed(&path);
         let is_new = !path.exists()
             || std::fs::metadata(&path)
                 .map(|m| m.len() == 0)
@@ -139,6 +142,37 @@ impl CsvLog {
         f.write_all(Self::row(rec, self.top_n).as_bytes())?;
         f.write_all(b"\r\n")?;
         Ok(())
+    }
+
+    /// When the column layout changed since the file was started (an app
+    /// update mid-day, or a different Top N), the old file is kept as
+    /// `YYYY-MM-DD.1.csv` and a fresh one begins, so rows never misalign
+    /// with their header.
+    fn rotate_if_header_changed(&self, path: &Path) {
+        let Ok(mut f) = std::fs::File::open(path) else {
+            return;
+        };
+        let mut first = String::new();
+        {
+            use std::io::BufRead;
+            let mut r = std::io::BufReader::new(&mut f);
+            if r.read_line(&mut first).is_err() {
+                return;
+            }
+        }
+        drop(f);
+        let first = first.trim_start_matches('\u{feff}').trim_end();
+        if first.is_empty() || first == Self::header(self.top_n) {
+            return;
+        }
+        for n in 1..100 {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("log");
+            let backup = path.with_file_name(format!("{stem}.{n}.csv"));
+            if !backup.exists() {
+                let _ = std::fs::rename(path, backup);
+                return;
+            }
+        }
     }
 
     /// Deletes `YYYY-MM-DD.csv` files older than the retention window.
@@ -196,7 +230,7 @@ mod tests {
         let h = CsvLog::header(5).split(',').count();
         let r = CsvLog::row(&rec, 5).split(',').count();
         assert_eq!(h, r);
-        assert_eq!(h, 23 + 10);
+        assert_eq!(h, 24 + 10);
         assert!(CsvLog::row(&rec, 5).starts_with("2026-11-03 09:05,1,60.0,60.0,"));
     }
 
@@ -214,6 +248,35 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], CsvLog::header(2));
         assert!(lines[2].starts_with("2026-11-03 09:06,"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotates_when_header_changes() {
+        let dir = temp_dir("rotate");
+        let path = dir.join("2026-11-03.csv");
+        std::fs::write(
+            &path,
+            "\u{feff}time,samples,old_column\r\n2026-11-03 09:00,1,2\r\n",
+        )
+        .unwrap();
+        let mut log = CsvLog::new(dir.clone(), 30, 2);
+        log.append(&record(
+            Local.with_ymd_and_hms(2026, 11, 3, 9, 5, 0).unwrap(),
+        ))
+        .unwrap();
+        assert!(dir.join("2026-11-03.1.csv").exists());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.trim_start_matches('\u{feff}')
+                .starts_with(&CsvLog::header(2))
+        );
+        // a second append with the same layout must not rotate again
+        log.append(&record(
+            Local.with_ymd_and_hms(2026, 11, 3, 9, 6, 0).unwrap(),
+        ))
+        .unwrap();
+        assert!(!dir.join("2026-11-03.2.csv").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

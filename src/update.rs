@@ -225,19 +225,28 @@ pub fn apply(staged: &Staged) -> Result<()> {
     Ok(())
 }
 
-/// Called by the new exe: waits for the old process to exit, then removes
-/// the old exe and the staged files.
-pub fn finish_after_update(old_pid: u32) {
+/// Waits up to 30 s for another process to exit (used after update and
+/// elevation restarts so the single-instance mutex is free).
+pub fn wait_for_pid(pid: u32) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
+    if pid == 0 {
+        return;
+    }
     unsafe {
-        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, old_pid) {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
             let _ = WaitForSingleObject(h, 30_000);
             let _ = CloseHandle(h);
         }
     }
+}
+
+/// Called by the new exe: waits for the old process to exit, then removes
+/// the old exe and the staged files.
+pub fn finish_after_update(old_pid: u32) {
+    wait_for_pid(old_pid);
     if let Ok(exe) = std::env::current_exe() {
         let old = exe.with_extension("old.exe");
         for _ in 0..10 {

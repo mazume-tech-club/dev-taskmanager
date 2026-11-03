@@ -12,7 +12,9 @@ use crate::config::{self, Config};
 use crate::icon;
 use crate::logger::CsvLog;
 use crate::metrics::fmt_gib;
+use crate::pawnio;
 use crate::sample::Sampler;
+use crate::sample::SensorState;
 use crate::update::{self, Outcome, Staged};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -51,6 +53,8 @@ const ID_OPEN_LOGS: usize = 2;
 const ID_AUTOSTART: usize = 3;
 const ID_CHECK_UPDATE: usize = 4;
 const ID_APPLY_UPDATE: usize = 5;
+const ID_ELEVATE: usize = 6;
+const ID_INSTALL_PAWNIO: usize = 7;
 /// First automatic update check after start.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 const ID_EXIT: usize = 9;
@@ -222,11 +226,25 @@ fn with_state(f: impl FnOnce(&mut State)) {
 /// menu's modal loop runs, because that loop re-enters `wndproc`.
 fn show_menu(hwnd: HWND) {
     let autostart_on = autostart::is_enabled();
-    let (update_busy, staged_version) = STATE.with(|s| {
+    let (update_busy, staged_version, sensor_state) = STATE.with(|s| {
         s.borrow()
             .as_ref()
-            .map(|st| (st.update_busy, update::staged().map(|u| u.version)))
-            .unwrap_or((false, None))
+            .map(|st| {
+                let sensor_state = st
+                    .sampler
+                    .shared
+                    .lock()
+                    .unwrap()
+                    .latest()
+                    .map(|x| x.sensor_state)
+                    .unwrap_or_default();
+                (
+                    st.update_busy,
+                    update::staged().map(|u| u.version),
+                    sensor_state,
+                )
+            })
+            .unwrap_or((false, None, SensorState::Disabled))
     });
     let choice = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
@@ -260,6 +278,19 @@ fn show_menu(hwnd: HWND) {
                 MF_STRING,
             );
         }
+        match sensor_state {
+            SensorState::NotElevated => item(
+                ID_ELEVATE,
+                "管理者権限で再起動（温度センサーを有効化）(&E)",
+                MF_STRING,
+            ),
+            SensorState::NotInstalled => item(
+                ID_INSTALL_PAWNIO,
+                "PawnIO をインストール（温度センサー）(&P)",
+                MF_STRING,
+            ),
+            _ => {}
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         item(ID_EXIT, "終了(&X)", MF_STRING);
         let mut pt = POINT::default();
@@ -288,9 +319,15 @@ fn show_menu(hwnd: HWND) {
         }
         ID_CHECK_UPDATE => with_state(|s| s.start_update_check(true)),
         ID_APPLY_UPDATE => with_state(|s| s.apply_update()),
+        ID_ELEVATE => with_state(|s| s.restart_elevated()),
+        ID_INSTALL_PAWNIO => open_url(pawnio::INSTALLER_URL),
         ID_EXIT => with_state(|s| s.exit()),
         _ => {}
     }
+}
+
+fn open_url(url: &str) {
+    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
 }
 
 fn open_logs() {
@@ -450,6 +487,32 @@ impl State {
                 let _ = tx.send(UpdateMsg { result, manual });
             })
             .ok();
+    }
+
+    /// Starts an elevated copy (UAC prompt) that waits for this process,
+    /// then exits. Autostart is switched to a scheduled task when the
+    /// elevated copy enables it.
+    fn restart_elevated(&mut self) {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::HSTRING;
+        let params = HSTRING::from(format!("--wait-for {}", std::process::id()));
+        let exe = HSTRING::from(self.exe.to_string_lossy().as_ref());
+        let r = unsafe {
+            ShellExecuteW(
+                None,
+                windows::core::w!("runas"),
+                &exe,
+                &params,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if r.0 as usize > 32 {
+            self.exit();
+        } else {
+            self.notice("CommitWatch", "管理者権限での起動がキャンセルされました。");
+        }
     }
 
     /// Replaces the exe with the staged one and exits; the new exe restarts
