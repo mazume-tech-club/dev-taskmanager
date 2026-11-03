@@ -116,15 +116,57 @@ Claude Code・Orca・Docker を併用すると、RAM は空いているのに Co
 
 ## リリースと自動更新
 
-- `vX.Y.Z` タグを push すると GitHub Actions（windows-latest）がビルドし、Releases に exe・`.sig`・`latest.json` を添付する。
-- バージョンは `Cargo.toml` を正とし、タグとの一致を CI で検証する。
-- push / PR では `cargo test` と `cargo clippy` を回す。
-- `latest.json` は Tauri updater と同じ形式（`version`、`notes`、`pub_date`、`platforms.windows-x86_64.{url, signature}`）。
-- 署名は minisign。鍵ペアは本アプリ専用に新規生成し、秘密鍵は GitHub secrets にだけ置く。
-- 更新確認は起動時 + 24 時間ごと + トレイメニューの「更新を確認」。失敗は黙って次回へ。
-- 更新が見つかったら事前にダウンロードし、バルーン通知で知らせる。適用と再起動はユーザーが選んだときだけ行う（監視とログに穴を空けないため）。
-- 適用は署名検証後に自分自身の exe を差し替えて再起動する。
+### リリース手順
 
-## 実装前に検証すること
+1. `Cargo.toml` の `version` を上げてコミットする。
+2. `git tag vX.Y.Z && git push origin main vX.Y.Z` を実行する。
+3. GitHub Actions（`.github/workflows/release.yml`、windows-latest）が、タグと `Cargo.toml` の一致を確認し、
+   `cargo test` → `cargo build --release` → `signer` で minisign 署名 → `latest.json` 生成 → Release 作成
+   （`commitwatch.exe`、`commitwatch.exe.sig`、`latest.json` を添付、リリースノートは自動生成）を行う。
+4. push / PR では `.github/workflows/ci.yml` が `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test` を回す。
 
-- `vmmem` / `vmmemWSL` の Process Commit が VM の実使用量を反映するか。反映しなければ VM Memory の取り方を変える。
+### 署名鍵
+
+- `cargo run --bin signer -- keygen <dir>` で本アプリ専用の minisign 鍵ペアを作る（暗号化なし）。
+- 公開鍵は `assets/update-public-key.txt` としてリポジトリに入れ、exe に埋め込む。
+- 秘密鍵 `commitwatch.key` はリポジトリに入れない（`.gitignore` の `*.key`）。ファイルの中身をそのまま
+  GitHub の Secrets `COMMITWATCH_SIGNING_KEY` に登録する。minisign CLI で作ったパスワード付き鍵なら
+  `COMMITWATCH_SIGNING_KEY_PASSWORD` も登録する。
+- 鍵を替えると、旧鍵で署名された版からの自動更新は検証に失敗する。替える場合は手動で入れ直してもらう。
+
+### `latest.json`（Tauri updater 形式）
+
+```json
+{
+  "version": "0.2.0",
+  "notes": "CommitWatch v0.2.0",
+  "pub_date": "2026-11-03T05:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<minisign 署名ファイルの本文を base64 にしたもの>",
+      "url": "https://github.com/mazume-tech-club/dev-taskmanager/releases/download/v0.2.0/commitwatch.exe"
+    }
+  }
+}
+```
+
+既定の取得先は `https://github.com/mazume-tech-club/dev-taskmanager/releases/latest/download/latest.json`。
+`config.toml` の `[update] endpoint` で上書きでき、`file://` も使える（ローカル検証用）。
+
+### アプリ側の動き
+
+| 段階 | 内容 |
+|------|------|
+| 確認 | 常駐が起動 30 秒後、以後 `check_interval_hours` ごと、またはトレイメニュー「更新を確認」／設定タブ「今すぐ確認」。バックグラウンドスレッドで実行 |
+| 準備 | semver で新しければ exe をダウンロードし、埋め込み公開鍵で署名を検証してから `%LOCALAPPDATA%\CommitWatch\updates\` に置く（`staged.json`）。検証に失敗したものは残さない |
+| 通知 | 準備できたらバルーン通知（情報）。適用はしない |
+| 適用 | トレイメニュー「vX に更新して再起動」。動作中の exe を `.old.exe` に改名 → 新 exe をコピー → `--after-update <pid>` で新プロセス起動 → 旧プロセス終了（ログの部分分を書き出し） |
+| 後始末 | 新プロセスは旧 pid の終了を待ち、`.old.exe` と `updates\` を削除して常駐を開始する |
+
+ローカルで端から端まで検証済み（2026-11-03）: 改ざんした exe は署名検証で拒否、正規の exe はステージされ、
+`--apply-update` で差し替え・再起動・後始末まで完了。診断コマンドは `--check-update`（確認と準備のみ）と
+`--apply-update`（ステージ済みを適用）。
+
+## 検証済みの前提
+
+- `vmmem` / `vmmemWSL` の Process Commit は VM の確保量を反映する（2026-11-03 確認。ワーキングセット 2 GB に対し Process Commit 6 GB）。
