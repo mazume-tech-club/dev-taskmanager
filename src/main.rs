@@ -1,6 +1,7 @@
-mod coretemp;
 mod cpu;
 mod metrics;
+mod pdh;
+mod thermal;
 
 use anyhow::Result;
 use metrics::fmt_gib;
@@ -68,11 +69,13 @@ fn probe() -> Result<()> {
     }
 
     let mut sampler = cpu::CpuSampler::new()?;
+    let mut clocks = cpu::ClockSampler::new().ok();
+    let mut thermal = thermal::ThermalSampler::new()?;
     std::thread::sleep(std::time::Duration::from_secs(1));
     let load = sampler.sample()?;
-    let clocks = cpu::clocks_mhz().unwrap_or_default();
     println!(
-        "\nCPU Load (1s): total {:.1}%  per logical: {}",
+        "
+CPU Load (1s): total {:.1}%  per logical: {}",
         load.total * 100.0,
         load.per_logical
             .iter()
@@ -80,46 +83,25 @@ fn probe() -> Result<()> {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    println!(
-        "Clock MHz (power manager): {}",
-        clocks
-            .iter()
-            .map(|m| m.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-
-    match coretemp::read()? {
-        None => println!("\nCore Temp: not running (no shared memory)"),
-        Some(ct) => {
-            println!(
-                "\nCore Temp v{}: {} ({} CPU x {} cores) {:.0} MHz = {:.0} x {:.1}, VID {:.3} V",
-                ct.struct_version,
-                ct.cpu_name,
-                ct.cpu_count,
-                ct.cores_per_cpu,
-                ct.cpu_speed_mhz,
-                ct.fsb_speed_mhz,
-                ct.multiplier,
-                ct.vid
-            );
-            println!(
-                "  TjMax {:?} C, package {:?} C, margin {:?} C, power {:?} W, TDP {:?} W",
-                ct.tj_max_c,
-                ct.package_temp_c(0),
-                ct.margin_to_tj_max_c(),
-                ct.power_w,
-                ct.tdp_w
-            );
-            for (i, t) in ct.core_temps_c.iter().enumerate() {
-                println!(
-                    "  core {:<2} {:>5.1} C  load {:>3}%",
-                    i,
-                    t,
-                    ct.core_loads_pct.get(i).copied().unwrap_or(0)
-                );
+    match clocks.as_mut().map(|c| c.sample()) {
+        Some(Ok(mhz)) => println!(
+            "Effective Clock MHz: {}",
+            mhz.iter()
+                .map(|m| format!("{m:.0}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Some(Err(e)) => println!("Effective Clock: unavailable ({e})"),
+        None => println!("Effective Clock: counters not available"),
+    }
+    match thermal.as_mut() {
+        None => println!("Thermal Zone: none on this machine"),
+        Some(t) => {
+            for z in t.sample()? {
+                println!("Thermal Zone {}: {:.1} C", z.name, z.celsius);
             }
         }
     }
+    println!("Core Temperature: unavailable (Sensor Provider is a later phase)");
     Ok(())
 }

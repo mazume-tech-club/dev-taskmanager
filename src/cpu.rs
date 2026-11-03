@@ -4,15 +4,13 @@
 //! kernel / user times, so callers keep a [`CpuSampler`] and call
 //! [`CpuSampler::sample`] once per interval. One kernel call per reading.
 
+use crate::pdh::CounterQuery;
 use anyhow::{Result, bail};
 use std::ffi::c_void;
 use windows::Wdk::System::SystemInformation::{
     NtQuerySystemInformation, SystemProcessorPerformanceInformation,
 };
 use windows::Win32::Foundation::STATUS_SUCCESS;
-use windows::Win32::System::Power::{
-    CallNtPowerInformation, PROCESSOR_POWER_INFORMATION, ProcessorInformation,
-};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows::Win32::System::WindowsProgramming::SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
 
@@ -109,29 +107,54 @@ fn read_times() -> Result<Vec<Times>> {
         .collect())
 }
 
-/// Current clock in MHz per logical processor, as reported by the power
-/// manager. On some systems this is the nominal clock rather than the live
-/// one; a Sensor Provider's value is preferred when available.
-pub fn clocks_mhz() -> Result<Vec<u32>> {
-    let n = logical_processor_count();
-    let mut buf = vec![PROCESSOR_POWER_INFORMATION::default(); n];
-    let len = (n * size_of::<PROCESSOR_POWER_INFORMATION>()) as u32;
-    let status = unsafe {
-        CallNtPowerInformation(
-            ProcessorInformation,
-            None,
-            0,
-            Some(buf.as_mut_ptr() as *mut c_void),
-            len,
-        )
-    };
-    if status != STATUS_SUCCESS {
-        bail!(
-            "CallNtPowerInformation(ProcessorInformation) = {:#x}",
-            status.0
-        );
+/// Effective Clock per logical processor, from the performance counters
+/// `% Processor Performance` (ratio to nominal, may exceed 100% under turbo)
+/// and `Processor Frequency` (nominal MHz). Readable without administrator
+/// rights. The power manager's `CurrentMhz` only reports the nominal clock.
+pub struct ClockSampler {
+    query: CounterQuery,
+}
+
+impl ClockSampler {
+    pub fn new() -> Result<Self> {
+        let mut query = CounterQuery::new(&[
+            r"\Processor Information(*)\% Processor Performance",
+            r"\Processor Information(*)\Processor Frequency",
+        ])?;
+        query.collect()?; // baseline for the rate counter
+        Ok(Self { query })
     }
-    Ok(buf.iter().map(|p| p.CurrentMhz).collect())
+
+    /// Effective Clock in MHz, indexed by logical processor number. Entries
+    /// without data yet are 0.
+    pub fn sample(&mut self) -> Result<Vec<f64>> {
+        self.query.collect()?;
+        let perf = self.query.values(0)?;
+        let freq = self.query.values(1)?;
+        let n = logical_processor_count();
+        let mut out = vec![0.0; n];
+        for (name, pct) in perf {
+            let Some(idx) = logical_index(&name) else {
+                continue;
+            };
+            let nominal = freq
+                .iter()
+                .find(|(f, _)| *f == name)
+                .map(|(_, v)| *v)
+                .unwrap_or(0.0);
+            if idx < n {
+                out[idx] = nominal * pct / 100.0;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Instance "g,i" is logical processor i of processor group g (64 per group).
+/// "_Total" and anything else yields None.
+fn logical_index(instance: &str) -> Option<usize> {
+    let (group, idx) = instance.split_once(',')?;
+    Some(group.parse::<usize>().ok()? * 64 + idx.parse::<usize>().ok()?)
 }
 
 #[cfg(test)]
@@ -149,9 +172,18 @@ mod tests {
     }
 
     #[test]
-    fn live_clocks_present() {
-        let c = clocks_mhz().expect("clocks");
-        assert_eq!(c.len(), logical_processor_count());
-        assert!(c.iter().all(|&m| m > 0));
+    fn live_effective_clock_present() {
+        let mut c = ClockSampler::new().expect("clock sampler");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mhz = c.sample().expect("sample");
+        assert_eq!(mhz.len(), logical_processor_count());
+        assert!(mhz.iter().any(|&m| m > 0.0), "{mhz:?}");
+    }
+
+    #[test]
+    fn logical_index_parses_group_and_index() {
+        assert_eq!(logical_index("0,3"), Some(3));
+        assert_eq!(logical_index("1,2"), Some(66));
+        assert_eq!(logical_index("_Total"), None);
     }
 }

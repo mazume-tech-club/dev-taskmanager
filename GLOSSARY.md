@@ -61,9 +61,17 @@ CPU パッケージ全体の温度。通常は各 Core Temperature の最大値�
 **TjMax**:
 CPU が熱保護のために動作を落とし始める温度。Core Temperature の余裕を測る基準。
 
+**Effective Clock**:
+ある期間に論理プロセッサが実際に動いていた平均クロック。ターボや省電力で公称クロックから上下する。
+_Avoid_: 現在クロック（電源マネージャが返す公称値と区別がつかないため）
+
+**Thermal Zone Temperature**:
+マザーボードの ACPI が報告する温度。通常は 1 点で、Core Temperature とは別物。管理者権限なしで読める。
+_Avoid_: CPU 温度、システム温度
+
 **Sensor Provider**:
-温度など本アプリが自力で読めない値を提供する外部プログラム。本アプリは Sensor Provider が動いているときだけその値を表示する。
-_Avoid_: センサーアプリ、監視ツール
+温度など本アプリがユーザーモードで読めない値を取るための経路。カーネルドライバ（PawnIO）とそのモジュールを指す。Sensor Provider が無い環境では、その値は「取得不可」として表示する。
+_Avoid_: センサーアプリ、監視ツール、Core Temp
 
 ### 状態
 

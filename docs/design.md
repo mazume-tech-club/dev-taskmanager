@@ -41,15 +41,25 @@ Claude Code・Orca・Docker を併用すると、RAM は空いているのに Co
 
 ## CPU
 
-- CPU Load とクロックは自前で取る（`NtQuerySystemInformation` と `CallNtPowerInformation`、1 秒に 1 回ずつ）。
-  電源マネージャのクロックは公称値で固定されることがあるので、Sensor Provider の値があればそちらを優先する。
-- 温度は MSR の読み取りが必要でユーザーモードでは取れないため、自前ドライバは持たず Sensor Provider から借りる。
-- Sensor Provider は Core Temp（alcpu.com）。共有メモリ `CoreTempMappingObjectEx` を 1 秒に 1 回コピーするだけなので負荷はほぼゼロ。
-  Core Temp 未起動時は「温度: Core Temp 未起動」と表示し、トレイメニューに「Core Temp を起動」を置く。
-- Core Temp は `requireAdministrator` 指定のため起動時に UAC が出る。常時表示したい場合は Core Temp 側の「Windows 起動時に開始」を使ってもらう。
+段階式（ADR 0002）。初版は管理者権限なしで取れる値だけを出し、第 2 段で Sensor Provider（PawnIO）を足す。
+
+### 初版（ドライバ無し・通常権限）
+
+- CPU Load: `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` の差分。1 秒に 1 回。
+- Effective Clock: パフォーマンスカウンター `% Processor Performance` × `Processor Frequency`。1 秒に 1 回。
+  電源マネージャの `CurrentMhz` は公称値しか返さないので使わない。
+- Thermal Zone Temperature: パフォーマンスカウンター `\Thermal Zone Information(*)\Temperature`（ケルビン）。
+  マザーボードの 1 点で、Core Temperature ではないことを画面に明記する。
+- Core Temperature・TjMax・VID・パッケージ電力は「取得不可（Sensor Provider 未導入）」と表示する。
+
+### 第 2 段（Sensor Provider = PawnIO）
+
+- PawnIO の公式モジュール `IntelMSR` を IOCTL で呼び、`IA32_THERM_STATUS`（コア温度）、`MSR_TEMPERATURE_TARGET`（TjMax）、
+  `IA32_PACKAGE_THERM_STATUS`（パッケージ温度）、RAPL（電力）、`IA32_PERF_STATUS`（VID）を読む。
+- アプリ全体を管理者権限で動かす。自動起動はタスクスケジューラの最上位特権で登録し UAC を出さない。
+- Intel 先行。AMD は別モジュールが必要になった時点で追加。
 - 温度の Alert Level: Package Temperature が TjMax − 15 ℃ で Warning、TjMax − 5 ℃ で Critical。トレイアイコンの色はメモリと温度の悪い方。
-- 検証済み（2026-11-03、Xeon W-1250 6C/12T）: CPU Load と公称クロック取得、Core Temp 共有メモリ構造体のオフセット（4740 バイト）。
-  Core Temp 起動中の実読み取りは未確認。
+- 他ツール（Core Temp 等）の共有メモリは読まない。個人利用限定ライセンスと UAC の問題があるため。
 
 ## 性能予算
 
