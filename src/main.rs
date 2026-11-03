@@ -1,3 +1,5 @@
+mod coretemp;
+mod cpu;
 mod metrics;
 
 use anyhow::Result;
@@ -63,6 +65,61 @@ fn probe() -> Result<()> {
             fmt_gib(p.commit),
             fmt_gib(p.working_set)
         );
+    }
+
+    let mut sampler = cpu::CpuSampler::new()?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let load = sampler.sample()?;
+    let clocks = cpu::clocks_mhz().unwrap_or_default();
+    println!(
+        "\nCPU Load (1s): total {:.1}%  per logical: {}",
+        load.total * 100.0,
+        load.per_logical
+            .iter()
+            .map(|v| format!("{:.0}", v * 100.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    println!(
+        "Clock MHz (power manager): {}",
+        clocks
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    match coretemp::read()? {
+        None => println!("\nCore Temp: not running (no shared memory)"),
+        Some(ct) => {
+            println!(
+                "\nCore Temp v{}: {} ({} CPU x {} cores) {:.0} MHz = {:.0} x {:.1}, VID {:.3} V",
+                ct.struct_version,
+                ct.cpu_name,
+                ct.cpu_count,
+                ct.cores_per_cpu,
+                ct.cpu_speed_mhz,
+                ct.fsb_speed_mhz,
+                ct.multiplier,
+                ct.vid
+            );
+            println!(
+                "  TjMax {:?} C, package {:?} C, margin {:?} C, power {:?} W, TDP {:?} W",
+                ct.tj_max_c,
+                ct.package_temp_c(0),
+                ct.margin_to_tj_max_c(),
+                ct.power_w,
+                ct.tdp_w
+            );
+            for (i, t) in ct.core_temps_c.iter().enumerate() {
+                println!(
+                    "  core {:<2} {:>5.1} C  load {:>3}%",
+                    i,
+                    t,
+                    ct.core_loads_pct.get(i).copied().unwrap_or(0)
+                );
+            }
+        }
     }
     Ok(())
 }
