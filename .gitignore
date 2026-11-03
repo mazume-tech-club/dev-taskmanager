@@ -1,0 +1,11 @@
+# Rust
+/target/
+
+# Claude Code: project rules stay local (they name strings that must never be published)
+/.claude/
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
