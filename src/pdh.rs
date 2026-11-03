@@ -68,7 +68,9 @@ impl CounterQuery {
     /// second call for rate counters.
     pub fn collect(&mut self) -> Result<()> {
         let status = unsafe { PdhCollectQueryData(self.query) };
-        if status != 0 {
+        // PDH_NO_DATA: the counters exist but none has a value (e.g. a VM
+        // with a thermal zone object and no instances). Not an error.
+        if status != 0 && status != PDH_NO_DATA {
             bail!("PdhCollectQueryData = {:#x}", status);
         }
         Ok(())
