@@ -95,9 +95,22 @@ Claude Code・Orca・Docker を併用すると、RAM は空いているのに Co
 - 自動起動は HKCU の Run キー（ユーザー単位、管理者権限不要）。トレイメニューで ON/OFF。
 - 二重起動は防ぐ。
 
+## プロセス構成（ADR 0003）
+
+| プロセス | 起動方法 | 役割 | 実測（release） |
+|---------|---------|------|----------------|
+| 常駐 | `commitwatch.exe`（自動起動は `--hidden`） | トレイアイコン、Alert Level、バルーン通知、サンプラー、CSV ログ、共有メモリ書き込み | Process Commit 約 10 MB、CPU 0.03% |
+| ウィンドウ | 常駐が `--window` で起動 | 共有メモリを毎秒読んで表示。閉じると終了 | Process Commit 約 45 MB |
+
+- 共有メモリ `Local\CommitWatch.state`: 直近 600 秒の Sample と最新の Top Processes。seqlock で整合を取る。
+- 設定はウィンドウが `config.toml` に書き、常駐が更新時刻を 5 秒ごとに見て読み直す。
+- 2 回目の起動は既存ウィンドウを前面に出すだけ。
+
 ## 技術
 
-- 純 Rust。GUI は egui / eframe、グラフは egui_plot、トレイは tray-icon。
+- 純 Rust。GUI は egui / eframe（レンダラーは glow 固定、`system_fonts` 無効）、グラフは egui_plot。
+- トレイは Win32 API を直接使う（`tray-icon` クレートはバルーン通知に非対応）。
+- 日本語フォントは BIZ UDGothic（SIL OFL）を `tools/subset_font.py` で JIS 第 1 水準までに絞って同梱。
 - Rust stable、edition 2024。
 - 配布は単一 exe。初回起動時に `%LOCALAPPDATA%\CommitWatch\` へのコピーと自動起動登録を提案する。
 

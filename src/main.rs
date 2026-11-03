@@ -1,35 +1,136 @@
+#![windows_subsystem = "windows"]
+
 mod alert;
+mod app;
+mod autostart;
 mod config;
 mod cpu;
+mod icon;
 mod logger;
 mod metrics;
 mod minute;
 mod pdh;
 mod sample;
+mod shm;
 mod thermal;
+mod tray;
 
 use alert::{AlertLevel, Notifier};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use config::Config;
 use metrics::fmt_gib;
+use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::core::w;
 
+/// Process roles:
+/// - no argument / `--hidden`: the resident process (tray, sampler, log);
+///   `--hidden` does not open the window (used by autostart).
+/// - `--window`: the window process, started by the resident.
+/// - `--probe`, `--headless [secs]`: console diagnostics.
 fn main() -> Result<()> {
-    env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("--probe") => probe(),
+        Some("--probe") => {
+            attach_console();
+            probe()
+        }
         Some("--headless") => {
+            attach_console();
             let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             headless(secs)
         }
-        _ => {
-            println!(
-                "CommitWatch {} (GUI not implemented yet; try --probe or --headless [seconds])",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ok(())
-        }
+        Some("--window") => window(),
+        Some("--hidden") => resident(true),
+        _ => resident(false),
     }
+}
+
+/// With the windows subsystem there is no console; borrow the parent's so
+/// `--probe` and `--headless` can print when run from a terminal.
+fn attach_console() {
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+    env_logger::init();
+}
+
+/// A tray app has no console, so panics go to `%LOCALAPPDATA%\CommitWatch\crash.log`.
+fn install_panic_log() {
+    let Ok(dir) = config::data_dir() else { return };
+    let path = dir.join("crash.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let line = format!(
+            "{} {}
+",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            info
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }));
+}
+
+/// True when this is the first resident process. The mutex lives as long as
+/// the process.
+fn single_instance() -> bool {
+    let handle = unsafe { CreateMutexW(None, false, w!("Local\\CommitWatch.single-instance")) };
+    match handle {
+        Ok(_) => windows::core::Error::from_thread().code() != ERROR_ALREADY_EXISTS.to_hresult(),
+        Err(_) => true,
+    }
+}
+
+fn resident(start_hidden: bool) -> Result<()> {
+    install_panic_log();
+    let exe = std::env::current_exe().context("current_exe")?;
+    if !single_instance() {
+        // Already running: a second launch just shows the window.
+        if !start_hidden && !tray::focus_existing_window() {
+            let _ = std::process::Command::new(&exe).arg("--window").spawn();
+        }
+        return Ok(());
+    }
+    let cfg = Config::load()?;
+    let log = logger::CsvLog::new(
+        config::log_dir()?,
+        cfg.log.retention_days,
+        cfg.general.top_processes,
+    );
+    let sampler = sample::Sampler::start(cfg.clone());
+    tray::run(sampler, log, cfg, exe, !start_hidden);
+    Ok(())
+}
+
+fn window() -> Result<()> {
+    install_panic_log();
+    let cfg = Config::load()?;
+    if shm::Reader::open()?.is_none() {
+        // No resident process: start one hidden; the window will attach.
+        let exe = std::env::current_exe().context("current_exe")?;
+        let _ = std::process::Command::new(exe).arg("--hidden").spawn();
+    }
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title(tray::WINDOW_TITLE)
+            .with_inner_size(app::NORMAL_SIZE)
+            .with_min_inner_size([320.0, 140.0])
+            .with_icon(app::window_icon()),
+        ..Default::default()
+    };
+    eframe::run_native(
+        tray::WINDOW_TITLE,
+        options,
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, cfg)))),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }
 
 /// Runs the sampler and the log without a window. `secs == 0` runs until

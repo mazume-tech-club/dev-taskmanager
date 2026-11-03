@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::cpu::{ClockSampler, CpuSampler};
 use crate::metrics::{self, ProcessCommit, SystemMemory};
 use crate::minute::{MinuteAccumulator, MinuteRecord};
+use crate::shm;
 use crate::thermal::ThermalSampler;
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -116,6 +117,13 @@ fn run(cfg: Config, shared: Arc<Mutex<Shared>>, minutes: Sender<MinuteRecord>, s
     let process_every = Duration::from_secs(cfg.general.process_interval_secs.max(1));
     let mut last_processes: Vec<ProcessCommit> = Vec::new();
     let mut last_process_read: Option<Instant> = None;
+    let mut shm = match shm::Writer::create() {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::error!("shared memory: {e}");
+            None
+        }
+    };
     let mut acc = MinuteAccumulator::default();
     let interval = Duration::from_secs(1);
     let mut next = Instant::now() + interval;
@@ -152,6 +160,9 @@ fn run(cfg: Config, shared: Arc<Mutex<Shared>>, minutes: Sender<MinuteRecord>, s
                     s.history.pop_front();
                 }
                 s.last_error = None;
+                if let Some(w) = shm.as_mut() {
+                    w.publish(s.history.iter(), s.history.back());
+                }
             }
             Err(e) => shared.lock().unwrap().last_error = Some(e.to_string()),
         }
@@ -182,7 +193,8 @@ fn take_sample(sources: &mut Sources, processes: &[ProcessCommit], top_n: usize)
         .filter(|p| p.is_vm())
         .map(|p| p.commit)
         .sum();
-    let top_processes = metrics::top_by_commit(processes.to_vec(), top_n);
+    // Keep more than the logged count so the window can show a longer list.
+    let top_processes = metrics::top_by_commit(processes.to_vec(), top_n.max(20));
 
     Ok(Sample {
         at: Local::now(),
