@@ -11,6 +11,7 @@ pub const APP_NAME: &str = "CommitWatch";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub alert: AlertConfig,
     pub log: LogConfig,
@@ -44,6 +45,8 @@ pub struct LogConfig {
 pub struct UpdateConfig {
     pub enabled: bool,
     pub check_interval_hours: u32,
+    /// Overrides the latest.json URL (testing). `file://` paths are allowed.
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +86,7 @@ impl Default for UpdateConfig {
         Self {
             enabled: true,
             check_interval_hours: 24,
+            endpoint: None,
         }
     }
 }
@@ -94,17 +98,6 @@ impl Default for GeneralConfig {
             top_processes: 5,
             process_interval_secs: 5,
             history_secs: 600,
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            alert: AlertConfig::default(),
-            log: LogConfig::default(),
-            update: UpdateConfig::default(),
-            general: GeneralConfig::default(),
         }
     }
 }

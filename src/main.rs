@@ -14,6 +14,7 @@ mod sample;
 mod shm;
 mod thermal;
 mod tray;
+mod update;
 
 use alert::{AlertLevel, Notifier};
 use anyhow::{Context, Result};
@@ -28,7 +29,7 @@ use windows::core::w;
 /// - no argument / `--hidden`: the resident process (tray, sampler, log);
 ///   `--hidden` does not open the window (used by autostart).
 /// - `--window`: the window process, started by the resident.
-/// - `--probe`, `--headless [secs]`: console diagnostics.
+/// - `--probe`, `--headless [secs]`, `--check-update`, `--apply-update`: console diagnostics.
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -40,6 +41,23 @@ fn main() -> Result<()> {
             attach_console();
             let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             headless(secs)
+        }
+        Some("--check-update") => {
+            attach_console();
+            check_update()
+        }
+        Some("--apply-update") => {
+            attach_console();
+            update::detach_inherited_stdio();
+            let staged = update::staged().ok_or_else(|| anyhow::anyhow!("no staged update"))?;
+            update::apply(&staged)?;
+            println!("applied {}; restarting", staged.version);
+            Ok(())
+        }
+        Some("--after-update") => {
+            let pid: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            update::finish_after_update(pid);
+            resident(false)
         }
         Some("--window") => window(),
         Some("--hidden") => resident(true),
@@ -90,6 +108,8 @@ fn single_instance() -> bool {
 
 fn resident(start_hidden: bool) -> Result<()> {
     install_panic_log();
+    update::detach_inherited_stdio();
+    update::cleanup_old_exe();
     let exe = std::env::current_exe().context("current_exe")?;
     if !single_instance() {
         // Already running: a second launch just shows the window.
@@ -111,6 +131,7 @@ fn resident(start_hidden: bool) -> Result<()> {
 
 fn window() -> Result<()> {
     install_panic_log();
+    update::detach_inherited_stdio();
     let cfg = Config::load()?;
     if shm::Reader::open()?.is_none() {
         // No resident process: start one hidden; the window will attach.
@@ -131,6 +152,24 @@ fn window() -> Result<()> {
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, cfg)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+/// Console diagnostic: check, download and verify, but do not apply.
+fn check_update() -> Result<()> {
+    let cfg = Config::load()?;
+    let endpoint = update::endpoint(&cfg.update);
+    println!("current version: {}", update::CURRENT_VERSION);
+    println!("endpoint:        {endpoint}");
+    match update::check_and_stage(&endpoint)? {
+        update::Outcome::UpToDate => println!("up to date"),
+        update::Outcome::Staged(s) => {
+            println!("staged {} at {}", s.version, s.path.display());
+            if !s.notes.is_empty() {
+                println!("notes: {}", s.notes);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Runs the sampler and the log without a window. `secs == 0` runs until

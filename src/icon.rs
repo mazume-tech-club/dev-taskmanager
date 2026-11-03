@@ -20,10 +20,7 @@ pub fn rgba(size: usize, level: AlertLevel, usage: f64) -> Vec<u8> {
     for y in 0..size {
         for x in 0..size {
             let inside = inside_rounded(x as f64 + 0.5, y as f64 + 0.5, size as f64, radius);
-            let border = inside
-                && !inside_rounded(x as f64 + 0.5, y as f64 + 0.5, size as f64, radius)
-                    .then(|| inner(x, y, size))
-                    .unwrap_or(false);
+            let border = inside && !inner(x, y, size);
             let from_bottom = size - 1 - y;
             let alpha = if !inside {
                 0
@@ -60,7 +57,7 @@ fn inside_rounded(x: f64, y: f64, size: f64, r: f64) -> bool {
 /// the format `CreateIconFromResourceEx` accepts.
 pub fn ico_image(size: usize, level: AlertLevel, usage: f64) -> Vec<u8> {
     let rgba = rgba(size, level, usage);
-    let mask_stride = ((size + 31) / 32) * 4;
+    let mask_stride = size.div_ceil(32) * 4;
     let xor_len = size * size * 4;
     let and_len = mask_stride * size;
     let mut out = Vec::with_capacity(40 + xor_len + and_len);

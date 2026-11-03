@@ -13,15 +13,17 @@ use crate::icon;
 use crate::logger::CsvLog;
 use crate::metrics::fmt_gib;
 use crate::sample::Sampler;
+use crate::update::{self, Outcome, Staged};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_WARNING, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -48,6 +50,9 @@ const ID_SHOW: usize = 1;
 const ID_OPEN_LOGS: usize = 2;
 const ID_AUTOSTART: usize = 3;
 const ID_CHECK_UPDATE: usize = 4;
+const ID_APPLY_UPDATE: usize = 5;
+/// First automatic update check after start.
+const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 const ID_EXIT: usize = 9;
 
 struct State {
@@ -64,6 +69,16 @@ struct State {
     window: Option<Child>,
     config_checked: Instant,
     config_mtime: Option<SystemTime>,
+    update_tx: Sender<UpdateMsg>,
+    update_rx: Receiver<UpdateMsg>,
+    update_busy: bool,
+    next_update_check: Instant,
+    staged_version: Option<String>,
+}
+
+struct UpdateMsg {
+    result: Result<Outcome, String>,
+    manual: bool,
 }
 
 thread_local! {
@@ -97,6 +112,7 @@ pub fn run(sampler: Sampler, log: CsvLog, cfg: Config, exe: PathBuf, open_window
     }
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     let config_mtime = config_mtime();
+    let (update_tx, update_rx) = channel();
 
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
@@ -113,6 +129,11 @@ pub fn run(sampler: Sampler, log: CsvLog, cfg: Config, exe: PathBuf, open_window
             window: None,
             config_checked: Instant::now(),
             config_mtime,
+            update_tx,
+            update_rx,
+            update_busy: false,
+            next_update_check: Instant::now() + FIRST_CHECK_DELAY,
+            staged_version: update::staged().map(|s| s.version),
         })
     });
     if open_window {
@@ -201,6 +222,12 @@ fn with_state(f: impl FnOnce(&mut State)) {
 /// menu's modal loop runs, because that loop re-enters `wndproc`.
 fn show_menu(hwnd: HWND) {
     let autostart_on = autostart::is_enabled();
+    let (update_busy, staged_version) = STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|st| (st.update_busy, update::staged().map(|u| u.version)))
+            .unwrap_or((false, None))
+    });
     let choice = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let item = |id: usize, text: &str, flags| {
@@ -219,9 +246,20 @@ fn show_menu(hwnd: HWND) {
         );
         item(
             ID_CHECK_UPDATE,
-            "更新を確認(&U)（未実装）",
-            MF_STRING | MF_GRAYED,
+            "更新を確認(&U)",
+            if update_busy {
+                MF_STRING | MF_GRAYED
+            } else {
+                MF_STRING
+            },
         );
+        if let Some(v) = &staged_version {
+            item(
+                ID_APPLY_UPDATE,
+                &format!("v{v} に更新して再起動(&R)"),
+                MF_STRING,
+            );
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         item(ID_EXIT, "終了(&X)", MF_STRING);
         let mut pt = POINT::default();
@@ -248,6 +286,8 @@ fn show_menu(hwnd: HWND) {
                 log::error!("autostart: {e}");
             }
         }
+        ID_CHECK_UPDATE => with_state(|s| s.start_update_check(true)),
+        ID_APPLY_UPDATE => with_state(|s| s.apply_update()),
         ID_EXIT => with_state(|s| s.exit()),
         _ => {}
     }
@@ -290,7 +330,13 @@ impl State {
         if alive && focus_existing_window() {
             return;
         }
-        match Command::new(&self.exe).arg("--window").spawn() {
+        match Command::new(&self.exe)
+            .arg("--window")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
             Ok(child) => self.window = Some(child),
             Err(e) => log::error!("start window: {e}"),
         }
@@ -341,6 +387,85 @@ impl State {
         }
 
         self.drain_minutes();
+        self.poll_updates();
+    }
+
+    fn poll_updates(&mut self) {
+        while let Ok(msg) = self.update_rx.try_recv() {
+            self.update_busy = false;
+            self.next_update_check = Instant::now()
+                + Duration::from_secs(
+                    u64::from(self.cfg.update.check_interval_hours.max(1)) * 3600,
+                );
+            match msg.result {
+                Ok(Outcome::UpToDate) => {
+                    self.staged_version = None;
+                    if msg.manual {
+                        self.notice(
+                            "CommitWatch",
+                            &format!("最新版です（v{}）。", update::CURRENT_VERSION),
+                        );
+                    }
+                }
+                Ok(Outcome::Staged(st)) => {
+                    let is_new = self.staged_version.as_deref() != Some(st.version.as_str());
+                    self.staged_version = Some(st.version.clone());
+                    if is_new || msg.manual {
+                        self.notice(
+                            "CommitWatch: 新しいバージョン",
+                            &format!(
+                                "v{} をダウンロードし署名を確認しました。トレイメニューの「更新して再起動」で適用できます。",
+                                st.version
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::error!("update check: {e}");
+                    if msg.manual {
+                        self.notice("CommitWatch: 更新の確認に失敗", &e);
+                    }
+                }
+            }
+        }
+        if !self.update_busy && self.cfg.update.enabled && Instant::now() >= self.next_update_check
+        {
+            self.start_update_check(false);
+        }
+    }
+
+    /// Runs the check on a background thread; the result arrives in `tick`.
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update_busy {
+            return;
+        }
+        self.update_busy = true;
+        self.next_update_check = Instant::now() + Duration::from_secs(3600);
+        let endpoint = update::endpoint(&self.cfg.update);
+        let tx = self.update_tx.clone();
+        std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || {
+                let result = update::check_and_stage(&endpoint).map_err(|e| e.to_string());
+                let _ = tx.send(UpdateMsg { result, manual });
+            })
+            .ok();
+    }
+
+    /// Replaces the exe with the staged one and exits; the new exe restarts
+    /// the resident (and the window) once this process is gone.
+    fn apply_update(&mut self) {
+        let Some(staged): Option<Staged> = update::staged() else {
+            self.notice("CommitWatch", "適用できる更新がありません。");
+            return;
+        };
+        match update::apply(&staged) {
+            Ok(()) => self.exit(),
+            Err(e) => {
+                log::error!("apply update: {e}");
+                self.notice("CommitWatch: 更新の適用に失敗", &e.to_string());
+            }
+        }
     }
 
     fn reload_config(&mut self) {
@@ -390,10 +515,18 @@ impl State {
         }
     }
 
+    fn notice(&mut self, title: &str, text: &str) {
+        self.show_balloon(title, text, false);
+    }
+
     fn balloon(&mut self, title: &str, text: &str) {
+        self.show_balloon(title, text, true);
+    }
+
+    fn show_balloon(&mut self, title: &str, text: &str, warning: bool) {
         let mut nid = self.nid;
         nid.uFlags = NIF_INFO;
-        nid.dwInfoFlags = NIIF_WARNING;
+        nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
         copy_wide(&mut nid.szInfoTitle, title);
         copy_wide(&mut nid.szInfo, text);
         unsafe {

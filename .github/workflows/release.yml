@@ -1,0 +1,65 @@
+# Release: push a tag `vX.Y.Z` whose version matches Cargo.toml.
+#
+#   1. bump `version` in Cargo.toml, commit
+#   2. git tag vX.Y.Z && git push origin main vX.Y.Z
+#
+# The job builds commitwatch.exe, signs it with the minisign key from the
+# repository secret COMMITWATCH_SIGNING_KEY (the full text of commitwatch.key
+# made by `cargo run --bin signer -- keygen`), writes latest.json in the Tauri
+# updater format, and publishes a GitHub Release with those three files.
+# Running apps pick it up at
+# https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($tag -ne $ver) { Write-Error "tag $tag != Cargo.toml version $ver"; exit 1 }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+        id: ver
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release --bin commitwatch --bin signer
+
+      - name: Sign and write latest.json
+        shell: pwsh
+        env:
+          COMMITWATCH_SIGNING_KEY: ${{ secrets.COMMITWATCH_SIGNING_KEY }}
+          COMMITWATCH_SIGNING_KEY_PASSWORD: ${{ secrets.COMMITWATCH_SIGNING_KEY_PASSWORD }}
+        run: |
+          if (-not $env:COMMITWATCH_SIGNING_KEY) { Write-Error "secret COMMITWATCH_SIGNING_KEY is not set"; exit 1 }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\commitwatch.exe dist\commitwatch.exe
+          .\target\release\signer.exe sign dist\commitwatch.exe
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/commitwatch.exe"
+          .\target\release\signer.exe manifest --version "${{ steps.ver.outputs.version }}" --url $url --sig dist\commitwatch.exe.sig --notes "CommitWatch ${{ github.ref_name }}" --out dist\latest.json
+          Get-Content dist\latest.json
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist\commitwatch.exe dist\commitwatch.exe.sig dist\latest.json --title "CommitWatch ${{ github.ref_name }}" --generate-notes --notes "Windows 用の単一 exe です。初回は commitwatch.exe をダウンロードして実行してください。以降はアプリが自動で更新を確認します。SmartScreen の警告が出た場合は「詳細情報」→「実行」を選んでください。"

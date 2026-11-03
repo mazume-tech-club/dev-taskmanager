@@ -47,9 +47,9 @@ impl CpuSampler {
         let mut per_logical = Vec::with_capacity(n);
         let mut sum_busy = 0i64;
         let mut sum_total = 0i64;
-        for i in 0..n {
-            let d_idle = now[i].idle - self.last[i].idle;
-            let d_busy = now[i].busy - self.last[i].busy;
+        for (cur, prev) in now.iter().zip(self.last.iter()).take(n) {
+            let d_idle = cur.idle - prev.idle;
+            let d_busy = cur.busy - prev.busy;
             let total = d_idle + d_busy;
             per_logical.push(if total > 0 {
                 d_busy as f64 / total as f64

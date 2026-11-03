@@ -9,3 +9,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# signing keys never belong in the repo
+*.key

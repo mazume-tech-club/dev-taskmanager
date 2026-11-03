@@ -10,9 +10,11 @@ use crate::icon;
 use crate::metrics::fmt_gib;
 use crate::sample::Sample;
 use crate::shm;
+use crate::update;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 pub const NORMAL_SIZE: [f32; 2] = [780.0, 600.0];
@@ -39,6 +41,8 @@ pub struct App {
     tab: Tab,
     compact: bool,
     status: Option<String>,
+    update_status: Option<String>,
+    update_rx: Option<Receiver<String>>,
 }
 
 impl App {
@@ -54,6 +58,8 @@ impl App {
             tab: Tab::Overview,
             compact: false,
             status: None,
+            update_status: None,
+            update_rx: None,
         }
     }
 
@@ -423,12 +429,56 @@ impl App {
 
         ui.add_space(8.0);
         ui.heading("更新");
-        ui.checkbox(&mut d.update.enabled, "自動で更新を確認する（未実装）");
+        ui.checkbox(&mut d.update.enabled, "自動で更新を確認する");
         ui.add(
             egui::Slider::new(&mut d.update.check_interval_hours, 1..=168)
                 .suffix(" 時間")
                 .text("確認間隔"),
         );
+        ui.label(format!("現在のバージョン: v{}", update::CURRENT_VERSION));
+        if let Some(st) = update::staged() {
+            ui.colored_label(
+                Color32::from_rgb(46, 160, 67),
+                format!(
+                    "v{} をダウンロード済み（署名確認済み）。トレイアイコンの右クリック →「更新して再起動」で適用します。",
+                    st.version
+                ),
+            );
+            if !st.notes.is_empty() {
+                ui.label(st.notes);
+            }
+        }
+        if let Some(rx) = &self.update_rx
+            && let Ok(msg) = rx.try_recv()
+        {
+            self.update_status = Some(msg);
+            self.update_rx = None;
+        }
+        ui.horizontal(|ui| {
+            let busy = self.update_rx.is_some();
+            if ui
+                .add_enabled(!busy, egui::Button::new("今すぐ確認"))
+                .clicked()
+            {
+                let endpoint = update::endpoint(&self.cfg.update);
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.update_rx = Some(rx);
+                self.update_status = Some("確認中…".into());
+                std::thread::spawn(move || {
+                    let msg = match update::check_and_stage(&endpoint) {
+                        Ok(update::Outcome::UpToDate) => "最新版です。".to_string(),
+                        Ok(update::Outcome::Staged(st)) => {
+                            format!("v{} を準備しました。", st.version)
+                        }
+                        Err(e) => format!("確認に失敗: {e}"),
+                    };
+                    let _ = tx.send(msg);
+                });
+            }
+            if let Some(st) = &self.update_status {
+                ui.label(st);
+            }
+        });
 
         ui.add_space(8.0);
         ui.heading("起動");

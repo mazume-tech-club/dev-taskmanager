@@ -285,7 +285,7 @@ fn unicode_to_string(s: &UNICODE_STRING) -> String {
 
 /// Top N processes by Process Commit, largest first.
 pub fn top_by_commit(mut procs: Vec<ProcessCommit>, n: usize) -> Vec<ProcessCommit> {
-    procs.sort_by(|a, b| b.commit.cmp(&a.commit));
+    procs.sort_by_key(|p| std::cmp::Reverse(p.commit));
     procs.truncate(n);
     procs
 }
