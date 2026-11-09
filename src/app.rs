@@ -13,7 +13,7 @@ use crate::sample::{Sample, SensorState};
 use crate::shm;
 use crate::update;
 use eframe::egui::{self, Color32, RichText, Ui};
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{Corner, Legend, Line, Plot, PlotPoints};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -235,15 +235,7 @@ impl App {
             );
             ui.label(RichText::new(level.label_ja()).size(20.0).color(colour));
         });
-        ui.add(
-            egui::ProgressBar::new(s.commit_usage() as f32)
-                .fill(colour)
-                .text(format!(
-                    "Commit Charge {} / Commit Limit {}",
-                    fmt_gib(s.memory.commit_charge),
-                    fmt_gib(s.memory.commit_limit)
-                )),
-        );
+        commit_bar(ui, &s.memory, colour);
         ui.add_space(6.0);
         egui::Grid::new("numbers")
             .num_columns(4)
@@ -311,7 +303,7 @@ impl App {
             .include_y(100.0)
             .include_x(span)
             .include_x(0.0)
-            .legend(Legend::default())
+            .legend(Legend::default().position(Corner::LeftBottom))
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -331,7 +323,7 @@ impl App {
             .include_y(100.0)
             .include_x(span)
             .include_x(0.0)
-            .legend(Legend::default())
+            .legend(Legend::default().position(Corner::LeftBottom))
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -615,6 +607,87 @@ impl App {
 
 /// egui's bundled fonts have no CJK glyphs; the embedded subset font goes
 /// first so Japanese and Latin text share one face.
+/// The Commit Charge / Commit Limit bar, split into RAM actually in use
+/// (solid) and committed-but-not-in-RAM (pale), with a tick at the
+/// physical memory size and a legend underneath.
+fn commit_bar(ui: &mut Ui, m: &crate::metrics::SystemMemory, colour: Color32) {
+    let in_use_colour = colour;
+    let reserved_colour = colour.gamma_multiply(0.4);
+    let height = 22.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let radius = 4.0;
+    painter.rect_filled(rect, radius, visuals.extreme_bg_color);
+
+    let limit = m.commit_limit.max(1) as f32;
+    let frac = |v: u64| (v as f32 / limit).clamp(0.0, 1.0);
+    let x_at = |f: f32| rect.left() + rect.width() * f;
+    let in_use = m.ram_in_use();
+    let charge_x = x_at(frac(m.commit_charge));
+    let in_use_x = x_at(frac(in_use));
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.min, egui::pos2(charge_x, rect.bottom())),
+        radius,
+        reserved_colour,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.min, egui::pos2(in_use_x, rect.bottom())),
+        radius,
+        in_use_colour,
+    );
+    if m.physical_total > 0 && m.physical_total < m.commit_limit {
+        let x = x_at(frac(m.physical_total));
+        painter.vline(
+            x,
+            rect.y_range(),
+            egui::Stroke::new(2.0, visuals.strong_text_color()),
+        );
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!(
+            "Commit Charge {} / Commit Limit {}",
+            fmt_gib(m.commit_charge),
+            fmt_gib(m.commit_limit)
+        ),
+        egui::TextStyle::Body.resolve(ui.style()),
+        visuals.strong_text_color(),
+    );
+    response.on_hover_text(format!(
+        "実際に使用（RAM 上） {}\n確保のみ（RAM 外・未使用） {}\n空き（確保可能） {}\n物理メモリ {}（白線）",
+        fmt_gib(in_use),
+        fmt_gib(m.commit_reserved_only()),
+        fmt_gib(m.commit_limit.saturating_sub(m.commit_charge)),
+        fmt_gib(m.physical_total),
+    ));
+
+    let free_colour = ui.visuals().extreme_bg_color;
+    ui.horizontal(|ui| {
+        let swatch = |ui: &mut Ui, c: Color32| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            ui.painter().rect_filled(r, 2.0, c);
+        };
+        swatch(ui, in_use_colour);
+        ui.label(format!("実際に使用 {}", fmt_gib(in_use)));
+        ui.add_space(12.0);
+        swatch(ui, reserved_colour);
+        ui.label(format!("確保のみ {}", fmt_gib(m.commit_reserved_only())));
+        ui.add_space(12.0);
+        swatch(ui, free_colour);
+        ui.label(format!(
+            "空き {}",
+            fmt_gib(m.commit_limit.saturating_sub(m.commit_charge))
+        ));
+        ui.add_space(12.0);
+        ui.label(format!("｜ 物理メモリ {}", fmt_gib(m.physical_total)));
+    });
+}
+
 fn install_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts

@@ -71,6 +71,20 @@ impl SystemMemory {
     pub fn page_file_in_use(&self) -> u64 {
         self.page_files.iter().map(|p| p.in_use).sum()
     }
+
+    /// Physical memory actually in use (total minus Available), capped at
+    /// Commit Charge so it can be drawn as the used part of the commit bar.
+    pub fn ram_in_use(&self) -> u64 {
+        self.physical_total
+            .saturating_sub(self.physical_available)
+            .min(self.commit_charge)
+    }
+
+    /// The part of Commit Charge that is promised but not backed by RAM in
+    /// use: Commit Charge minus [`Self::ram_in_use`].
+    pub fn commit_reserved_only(&self) -> u64 {
+        self.commit_charge - self.ram_in_use()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -311,6 +325,31 @@ mod tests {
     #[test]
     fn commit_usage_zero_limit_is_zero() {
         assert_eq!(SystemMemory::default().commit_usage(), 0.0);
+    }
+
+    #[test]
+    fn commit_splits_into_in_use_and_reserved() {
+        let m = SystemMemory {
+            commit_charge: 50,
+            commit_limit: 80,
+            physical_total: 64,
+            physical_available: 34,
+            ..Default::default()
+        };
+        assert_eq!(m.ram_in_use(), 30);
+        assert_eq!(m.commit_reserved_only(), 20);
+    }
+
+    #[test]
+    fn ram_in_use_is_capped_at_commit_charge() {
+        let m = SystemMemory {
+            commit_charge: 20,
+            physical_total: 64,
+            physical_available: 4,
+            ..Default::default()
+        };
+        assert_eq!(m.ram_in_use(), 20);
+        assert_eq!(m.commit_reserved_only(), 0);
     }
 
     #[test]
